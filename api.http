@@ -1,0 +1,10 @@
+# Requests for the weaviate-monitor HTTP API.
+# Start the service first: `make up` (Weaviate), then `make run`.
+
+@host = http://127.0.0.1:3000
+
+### Health of the monitor service itself
+GET {{host}}/healthz
+
+### Liveness of the Weaviate cluster (200 when up, 503 when degraded or down)
+GET {{host}}/api/liveness

@@ -1,3 +1,4 @@
+mod client;
 mod http;
 
 use std::net::SocketAddr;
@@ -21,12 +22,15 @@ async fn main() -> anyhow::Result<()> {
         .parse()
         .context("BIND_ADDR must be a socket address, e.g. 127.0.0.1:3000")?;
 
+    let weaviate = client::WeaviateClient::from_env()?;
+    tracing::info!(url = %weaviate.base_url(), "monitoring weaviate");
+
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("failed to bind {addr}"))?;
     tracing::info!("listening on http://{}", listener.local_addr()?);
 
-    axum::serve(listener, http::router(http::AppState::new()))
+    axum::serve(listener, http::router(http::AppState::new(weaviate)))
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 
