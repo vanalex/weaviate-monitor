@@ -1,0 +1,120 @@
+# Local 3-node Weaviate cluster for developing weaviate-monitor.
+#
+#   docker compose up -d
+#
+# REST:       node1 http://localhost:8080, node2 :8081, node3 :8082
+# gRPC:       node1 localhost:50051, node2 :50052, node3 :50053
+# Prometheus: node1 http://localhost:2112/metrics, node2 :2113, node3 :2114
+#
+# API keys (dev only):
+#   admin-key    -> user "admin",   root role (use for seeding)
+#   readonly-key -> user "monitor", viewer role (use for the monitor)
+
+x-weaviate: &weaviate
+  image: cr.weaviate.io/semitechnologies/weaviate:${WEAVIATE_VERSION:-1.40.4}
+  command: ["--host", "0.0.0.0", "--port", "8080", "--scheme", "http"]
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/v1/.well-known/ready"]
+    interval: 5s
+    timeout: 3s
+    retries: 20
+    start_period: 10s
+
+x-weaviate-env: &weaviate-env
+  QUERY_DEFAULTS_LIMIT: "25"
+  PERSISTENCE_DATA_PATH: /var/lib/weaviate
+  DEFAULT_VECTORIZER_MODULE: none
+  ENABLE_MODULES: backup-filesystem
+  BACKUP_FILESYSTEM_PATH: /var/lib/weaviate-backups
+  ASYNC_INDEXING: "true"
+  PROMETHEUS_MONITORING_ENABLED: "true"
+  # Auth: API keys + RBAC, so the monitor can be tested with a read-only key.
+  AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "false"
+  AUTHENTICATION_APIKEY_ENABLED: "true"
+  AUTHENTICATION_APIKEY_ALLOWED_KEYS: admin-key,readonly-key
+  AUTHENTICATION_APIKEY_USERS: admin,monitor
+  AUTHORIZATION_RBAC_ENABLED: "true"
+  AUTHORIZATION_RBAC_ROOT_USERS: admin
+  # "monitor" gets the built-in viewer role from the weaviate-init service below
+  # (AUTHORIZATION_RBAC_READONLY_USERS doesn't assign a role in 1.40).
+  # Clustering
+  CLUSTER_GOSSIP_BIND_PORT: "7100"
+  CLUSTER_DATA_BIND_PORT: "7101"
+  RAFT_JOIN: node1,node2,node3
+  RAFT_BOOTSTRAP_EXPECT: "3"
+
+services:
+  weaviate-node-1:
+    <<: *weaviate
+    ports:
+      - "8080:8080"
+      - "50051:50051"
+      - "2112:2112"
+    volumes:
+      - weaviate-node-1:/var/lib/weaviate
+      - weaviate-backups:/var/lib/weaviate-backups
+    environment:
+      <<: *weaviate-env
+      CLUSTER_HOSTNAME: node1
+
+  weaviate-node-2:
+    <<: *weaviate
+    ports:
+      - "8081:8080"
+      - "50052:50051"
+      - "2113:2112"
+    volumes:
+      - weaviate-node-2:/var/lib/weaviate
+      - weaviate-backups:/var/lib/weaviate-backups
+    environment:
+      <<: *weaviate-env
+      CLUSTER_HOSTNAME: node2
+      CLUSTER_JOIN: weaviate-node-1:7100
+    depends_on:
+      - weaviate-node-1
+
+  weaviate-node-3:
+    <<: *weaviate
+    ports:
+      - "8082:8080"
+      - "50053:50051"
+      - "2114:2112"
+    volumes:
+      - weaviate-node-3:/var/lib/weaviate
+      - weaviate-backups:/var/lib/weaviate-backups
+    environment:
+      <<: *weaviate-env
+      CLUSTER_HOSTNAME: node3
+      CLUSTER_JOIN: weaviate-node-1:7100
+    depends_on:
+      - weaviate-node-1
+
+  # One-shot: give the monitor's key the read-only "viewer" role. Idempotent.
+  weaviate-init:
+    image: curlimages/curl:8.11.1
+    restart: "no"
+    depends_on:
+      weaviate-node-1: { condition: service_healthy }
+      weaviate-node-2: { condition: service_healthy }
+      weaviate-node-3: { condition: service_healthy }
+    command:
+      - -fsS
+      - --retry
+      - "10"
+      - --retry-all-errors
+      - -X
+      - POST
+      - -H
+      - "Authorization: Bearer admin-key"
+      - -H
+      - "Content-Type: application/json"
+      - -d
+      - '{"roles":["viewer"],"userType":"db"}'
+      - http://weaviate-node-1:8080/v1/authz/users/monitor/assign
+
+volumes:
+  weaviate-node-1:
+  weaviate-node-2:
+  weaviate-node-3:
+  weaviate-backups:
